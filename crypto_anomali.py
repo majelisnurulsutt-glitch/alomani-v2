@@ -22,12 +22,12 @@ AGENTROUTER_API_KEY = os.environ.get("AGENTROUTER_API_KEY")
 # ─── Filter Constants (dapat di-override via env) ─────────────────────────────
 MIN_GAIN_24H    = float(os.environ.get("MIN_GAIN_24H",    50.0))
 MIN_VOLUME_24H  = float(os.environ.get("MIN_VOLUME_24H",  50000.0))
-MIN_LIQUIDITY   = float(os.environ.get("MIN_LIQUIDITY",   10000.0))
-MIN_MARKET_CAP  = float(os.environ.get("MIN_MARKET_CAP",  100000.0))
+MIN_LIQUIDITY   = float(os.environ.get("MIN_LIQUIDITY",   25000.0))
+MIN_MARKET_CAP  = float(os.environ.get("MIN_MARKET_CAP",  500000.0))
 MAX_MARKET_CAP  = float(os.environ.get("MAX_MARKET_CAP",  50000000.0))
-MIN_PRICE       = float(os.environ.get("MIN_PRICE",       0.01))
-MIN_TOKEN_AGE_DAYS = int(os.environ.get("MIN_TOKEN_AGE_DAYS", 7))
-MIN_TX_COUNT_24H   = int(os.environ.get("MIN_TX_COUNT_24H",   200))
+MIN_PRICE       = float(os.environ.get("MIN_PRICE",       0.000001))
+MIN_TOKEN_AGE_DAYS = int(os.environ.get("MIN_TOKEN_AGE_DAYS", 14))
+MIN_TX_COUNT_24H   = int(os.environ.get("MIN_TX_COUNT_24H",   500))
 SCAN_INTERVAL_MIN  = int(os.environ.get("SCAN_INTERVAL_MIN",  30))
 
 # ─── Deduplication Cache ──────────────────────────────────────────────────────
