@@ -91,6 +91,7 @@ def process_single_token(boost: dict) -> dict | None:
 
     pairs = fetch_token_pairs(token_address)
     if not pairs:
+        logger.info(f"SKIP {token_address[:10]}… → pairs kosong (API error atau token tidak ditemukan)")
         return None
 
     # Gunakan pair dengan likuiditas tertinggi
@@ -106,10 +107,10 @@ def process_single_token(boost: dict) -> dict | None:
     tx_count    = int(best_pair.get("txns", {}).get("h24", {}).get("buys", 0) or 0) + \
                   int(best_pair.get("txns", {}).get("h24", {}).get("sells", 0) or 0)
 
-    # ── Debug log per token ──
-    logger.debug(
-        f"{token_address[:8]}… | gain24h={gain_24h}% | gain1h={gain_1h}% | "
-        f"vol={volume_24h} | liq={liquidity} | mcap={market_cap} | "
+    # ── Log data mentah per token ──
+    logger.info(
+        f"DATA {token_address[:10]}… | gain24h={gain_24h}% | gain1h={gain_1h}% | "
+        f"vol={volume_24h:.0f} | liq={liquidity:.0f} | mcap={market_cap:.0f} | "
         f"price={price_usd} | age={age_days}d | tx={tx_count}"
     )
 
@@ -347,6 +348,7 @@ def run_scan():
     if not boosts:
         logger.warning("Tidak ada data boost yang di-fetch. Scan dibatalkan.")
         return
+    logger.info(f"Total raw boosts dari Dexscreener: {len(boosts)}")
 
     categorized = filter_and_categorize(boosts, sent_cache)
 
