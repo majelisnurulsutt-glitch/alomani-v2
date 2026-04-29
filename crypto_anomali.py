@@ -14,20 +14,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Configuration from Environment Variables ─────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
 BOT_TOKEN           = os.environ.get("BOT_TOKEN")
 CHAT_ID             = os.environ.get("CHAT_ID")
 AGENTROUTER_API_KEY = os.environ.get("AGENTROUTER_API_KEY")
 
-# ─── Filter Constants (dapat di-override via env) ─────────────────────────────
-MIN_GAIN_24H    = float(os.environ.get("MIN_GAIN_24H",    50.0))
-MIN_VOLUME_24H  = float(os.environ.get("MIN_VOLUME_24H",  50000.0))
-MIN_LIQUIDITY   = float(os.environ.get("MIN_LIQUIDITY",   25000.0))
-MIN_MARKET_CAP  = float(os.environ.get("MIN_MARKET_CAP",  500000.0))
-MAX_MARKET_CAP  = float(os.environ.get("MAX_MARKET_CAP",  50000000.0))
-MIN_PRICE       = float(os.environ.get("MIN_PRICE",       0.000001))
-MIN_TOKEN_AGE_DAYS = int(os.environ.get("MIN_TOKEN_AGE_DAYS", 14))
-MIN_TX_COUNT_24H   = int(os.environ.get("MIN_TX_COUNT_24H",   500))
+# ─── Filter Constants ─────────────────────────────────────────────────────────
+MIN_GAIN_24H       = float(os.environ.get("MIN_GAIN_24H",    50.0))
+MIN_VOLUME_24H     = float(os.environ.get("MIN_VOLUME_24H",  50000.0))
+MIN_LIQUIDITY      = float(os.environ.get("MIN_LIQUIDITY",   10000.0))
+MIN_MARKET_CAP     = float(os.environ.get("MIN_MARKET_CAP",  100000.0))
+MAX_MARKET_CAP     = float(os.environ.get("MAX_MARKET_CAP",  50000000.0))
+MIN_TOKEN_AGE_DAYS = int(os.environ.get("MIN_TOKEN_AGE_DAYS", 1))
+MIN_TX_COUNT_24H   = int(os.environ.get("MIN_TX_COUNT_24H",   200))
 SCAN_INTERVAL_MIN  = int(os.environ.get("SCAN_INTERVAL_MIN",  30))
 
 # ─── Deduplication Cache ──────────────────────────────────────────────────────
@@ -49,24 +48,24 @@ def save_sent_cache(cache: set):
     except Exception as e:
         logger.warning(f"Failed to save sent cache: {e}")
 
-# ─── API: Dexscreener ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 1 — DEXSCREENER (Micin Watch)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def fetch_boosts() -> list:
-    """Fetch top boosted tokens dari Dexscreener."""
     url = "https://api.dexscreener.com/token-boosts/top/v1"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            logger.info(f"Fetched {len(data)} boosted tokens from Dexscreener")
+            logger.info(f"Dexscreener: fetched {len(data)} boosted tokens")
             return data
-        else:
-            logger.warning(f"Dexscreener returned status {r.status_code}")
+        logger.warning(f"Dexscreener status {r.status_code}")
     except Exception as e:
         logger.error(f"Error fetching boosts: {e}")
     return []
 
 def fetch_token_pairs(token_address: str) -> list:
-    """Fetch semua pairs untuk satu token address."""
     url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
     try:
         r = requests.get(url, timeout=10)
@@ -82,123 +81,192 @@ def get_token_age_days(pair_created_at) -> int:
     created_time = datetime.fromtimestamp(pair_created_at / 1000)
     return (datetime.now() - created_time).days
 
-# ─── Filter & Categorize ──────────────────────────────────────────────────────
-def process_single_token(boost: dict) -> dict | None:
-    """Proses satu token: fetch pairs, filter, return data jika lolos."""
+def process_dex_token(boost: dict) -> dict | None:
     token_address = boost.get("tokenAddress")
     if not token_address:
         return None
 
     pairs = fetch_token_pairs(token_address)
     if not pairs:
-        logger.info(f"SKIP {token_address[:10]}… → pairs kosong (API error atau token tidak ditemukan)")
+        logger.info(f"SKIP {token_address[:10]}... -> pairs kosong")
         return None
 
-    # Gunakan pair dengan likuiditas tertinggi
-    best_pair = max(pairs, key=lambda x: x.get("liquidity", {}).get("usd", 0) or 0)
+    best_pair  = max(pairs, key=lambda x: x.get("liquidity", {}).get("usd", 0) or 0)
+    price_usd  = float(best_pair.get("priceUsd", 0) or 0)
+    gain_24h   = float(best_pair.get("priceChange", {}).get("h24", 0) or 0)
+    gain_1h    = float(best_pair.get("priceChange", {}).get("h1", 0) or 0)
+    volume_24h = float(best_pair.get("volume", {}).get("h24", 0) or 0)
+    liquidity  = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
+    market_cap = float(best_pair.get("marketCap", 0) or best_pair.get("fdv", 0) or 0)
+    age_days   = get_token_age_days(best_pair.get("pairCreatedAt"))
+    tx_count   = (int(best_pair.get("txns", {}).get("h24", {}).get("buys", 0) or 0) +
+                  int(best_pair.get("txns", {}).get("h24", {}).get("sells", 0) or 0))
 
-    price_usd   = float(best_pair.get("priceUsd", 0) or 0)
-    gain_24h    = float(best_pair.get("priceChange", {}).get("h24", 0) or 0)
-    gain_1h     = float(best_pair.get("priceChange", {}).get("h1", 0) or 0)
-    volume_24h  = float(best_pair.get("volume", {}).get("h24", 0) or 0)
-    liquidity   = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
-    market_cap  = float(best_pair.get("marketCap", 0) or best_pair.get("fdv", 0) or 0)
-    age_days    = get_token_age_days(best_pair.get("pairCreatedAt"))
-    tx_count    = int(best_pair.get("txns", {}).get("h24", {}).get("buys", 0) or 0) + \
-                  int(best_pair.get("txns", {}).get("h24", {}).get("sells", 0) or 0)
-
-    # ── Log data mentah per token ──
     logger.info(
-        f"DATA {token_address[:10]}… | gain24h={gain_24h}% | gain1h={gain_1h}% | "
+        f"DEX {token_address[:10]}... | gain24h={gain_24h}% | gain1h={gain_1h}% | "
         f"vol={volume_24h:.0f} | liq={liquidity:.0f} | mcap={market_cap:.0f} | "
         f"price={price_usd} | age={age_days}d | tx={tx_count}"
     )
 
-    # ── Apply Filters ──
-    reasons_skipped = []
-    if gain_24h < MIN_GAIN_24H:
-        reasons_skipped.append(f"gain_24h={gain_24h:.1f}% < {MIN_GAIN_24H}")
-    if gain_1h <= 0:
-        reasons_skipped.append(f"gain_1h={gain_1h:.1f}% not positive")
-    if volume_24h < MIN_VOLUME_24H:
-        reasons_skipped.append(f"volume={volume_24h:.0f} < {MIN_VOLUME_24H}")
-    if liquidity < MIN_LIQUIDITY:
-        reasons_skipped.append(f"liquidity={liquidity:.0f} < {MIN_LIQUIDITY}")
-    if market_cap < MIN_MARKET_CAP or market_cap > MAX_MARKET_CAP:
-        reasons_skipped.append(f"mcap={market_cap:.0f} out of range")
-    if price_usd < MIN_PRICE:
-        reasons_skipped.append(f"price={price_usd} < {MIN_PRICE}")
-    if age_days < MIN_TOKEN_AGE_DAYS:
-        reasons_skipped.append(f"age={age_days}d < {MIN_TOKEN_AGE_DAYS}d")
-    if tx_count < MIN_TX_COUNT_24H:
-        reasons_skipped.append(f"tx_count={tx_count} < {MIN_TX_COUNT_24H}")
+    reasons = []
+    if gain_24h < MIN_GAIN_24H:       reasons.append(f"gain_24h={gain_24h:.1f}% < {MIN_GAIN_24H}")
+    if gain_1h <= 0:                  reasons.append(f"gain_1h={gain_1h:.1f}% not positive")
+    if volume_24h < MIN_VOLUME_24H:   reasons.append(f"volume={volume_24h:.0f} < {MIN_VOLUME_24H}")
+    if liquidity < MIN_LIQUIDITY:     reasons.append(f"liquidity={liquidity:.0f} < {MIN_LIQUIDITY}")
+    if not (MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP):
+                                      reasons.append(f"mcap={market_cap:.0f} out of range")
+    if age_days < MIN_TOKEN_AGE_DAYS: reasons.append(f"age={age_days}d < {MIN_TOKEN_AGE_DAYS}d")
+    if tx_count < MIN_TX_COUNT_24H:   reasons.append(f"tx_count={tx_count} < {MIN_TX_COUNT_24H}")
 
-    if reasons_skipped:
-        logger.info(f"SKIP {token_address[:10]}… → {' | '.join(reasons_skipped)}")
+    if reasons:
+        logger.info(f"SKIP {token_address[:10]}... -> {' | '.join(reasons)}")
         return None
 
     symbol = best_pair.get("baseToken", {}).get("symbol", "?")
-    logger.info(f"PASS ✅ {symbol} ({token_address[:10]}…) | gain={gain_24h}%")
+    logger.info(f"PASS DEX {symbol} | gain={gain_24h}%")
 
     return {
-        "address":  token_address,
-        "symbol":   symbol,
-        "name":     best_pair.get("baseToken", {}).get("name", "?"),
-        "chain":    best_pair.get("chainId", "").upper(),
-        "gain_24h": gain_24h,
-        "gain_1h":  gain_1h,
-        "volume":   volume_24h,
+        "address":   token_address,
+        "symbol":    symbol,
+        "name":      best_pair.get("baseToken", {}).get("name", "?"),
+        "chain":     best_pair.get("chainId", "").upper(),
+        "gain_24h":  gain_24h,
+        "gain_1h":   gain_1h,
+        "volume":    volume_24h,
         "liquidity": liquidity,
-        "mcap":     market_cap,
-        "url":      best_pair.get("url", ""),
+        "mcap":      market_cap,
+        "url":       best_pair.get("url", ""),
+        "source":    "dex",
     }
 
-def filter_and_categorize(boosts: list, sent_cache: set) -> dict:
-    """Filter semua token secara paralel, kategorikan hasilnya."""
+def fetch_and_filter_dex(boosts: list, sent_cache: set) -> dict:
     results = {"Mega": [], "Mid": [], "Micro": []}
 
-    # Deduplicate address dari boost list
-    seen = set()
-    unique_boosts = []
+    seen, unique = set(), []
     for b in boosts:
         addr = b.get("tokenAddress")
         if addr and addr not in seen:
             seen.add(addr)
-            unique_boosts.append(b)
+            unique.append(b)
 
-    logger.info(f"Processing {len(unique_boosts)} unique token addresses...")
+    logger.info(f"DEX: processing {len(unique)} unique addresses...")
 
-    passed = []
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(process_single_token, b): b for b in unique_boosts}
+        futures = {executor.submit(process_dex_token, b): b for b in unique}
         for future in as_completed(futures):
             result = future.result()
             if result and result["address"] not in sent_cache:
-                passed.append(result)
+                if result["gain_24h"] >= 300:
+                    results["Mega"].append(result)
+                elif result["mcap"] >= 1_000_000:
+                    results["Mid"].append(result)
+                else:
+                    results["Micro"].append(result)
 
-    logger.info(f"{len(passed)} token lolos filter (belum pernah dikirim)")
-
-    for token in passed:
-        if token["gain_24h"] >= 300:
-            results["Mega"].append(token)
-        elif token["mcap"] >= 1_000_000:
-            results["Mid"].append(token)
-        else:
-            results["Micro"].append(token)
-
+    total = sum(len(v) for v in results.values())
+    logger.info(f"DEX: {total} token lolos filter")
     return results
 
-# ─── AI Narrative (Claude via AgentRouter + Web Search) ───────────────────────
-def generate_narrative(token: dict) -> str | None:
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 2 — GECKOTERMINAL (Non-Micin Gems)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_gecko_trending() -> list:
+    url = "https://api.geckoterminal.com/api/v2/networks/trending_pools?include=base_token&page=1"
+    try:
+        r = requests.get(url, timeout=10, headers={"Accept": "application/json"})
+        if r.status_code == 200:
+            pools = r.json().get("data", [])
+            logger.info(f"GeckoTerminal: fetched {len(pools)} trending pools")
+            return pools
+        logger.warning(f"GeckoTerminal status {r.status_code}")
+    except Exception as e:
+        logger.error(f"Error fetching GeckoTerminal: {e}")
+    return []
+
+def fetch_and_filter_gecko(pools: list, sent_cache: set) -> list:
+    results = []
+
+    for pool in pools:
+        try:
+            attr = pool.get("attributes", {})
+            rel  = pool.get("relationships", {})
+
+            price_change = attr.get("price_change_percentage", {})
+            gain_24h   = float(price_change.get("h24", 0) or 0)
+            gain_1h    = float(price_change.get("h1", 0) or 0)
+            volume_24h = float(attr.get("volume_usd", {}).get("h24", 0) or 0)
+            liquidity  = float(attr.get("reserve_in_usd", 0) or 0)
+            market_cap = float(attr.get("market_cap_usd", 0) or attr.get("fdv_usd", 0) or 0)
+            tx_buys    = int(attr.get("transactions", {}).get("h24", {}).get("buys", 0) or 0)
+            tx_sells   = int(attr.get("transactions", {}).get("h24", {}).get("sells", 0) or 0)
+            tx_count   = tx_buys + tx_sells
+
+            token_id   = rel.get("base_token", {}).get("data", {}).get("id", pool.get("id", ""))
+            network    = rel.get("network", {}).get("data", {}).get("id", "").upper()
+            pool_name  = attr.get("name", "?")
+            symbol     = pool_name.split("/")[0].strip()
+            pool_addr  = attr.get("address", "")
+            url        = f"https://www.geckoterminal.com/{network.lower()}/pools/{pool_addr}"
+
+            logger.info(
+                f"GECKO {symbol[:12]} | gain24h={gain_24h}% | gain1h={gain_1h}% | "
+                f"vol={volume_24h:.0f} | liq={liquidity:.0f} | mcap={market_cap:.0f} | tx={tx_count}"
+            )
+
+            reasons = []
+            if gain_24h < MIN_GAIN_24H:     reasons.append(f"gain_24h={gain_24h:.1f}%")
+            if gain_1h <= 0:                reasons.append("gain_1h not positive")
+            if volume_24h < MIN_VOLUME_24H: reasons.append("volume low")
+            if liquidity < MIN_LIQUIDITY:   reasons.append("liquidity low")
+            if market_cap > 0 and market_cap < MIN_MARKET_CAP:
+                                            reasons.append("mcap too low")
+            if tx_count < MIN_TX_COUNT_24H: reasons.append("tx low")
+            if token_id in sent_cache:      reasons.append("already sent")
+
+            if reasons:
+                logger.info(f"SKIP GECKO {symbol} -> {' | '.join(reasons)}")
+                continue
+
+            logger.info(f"PASS GECKO {symbol} | gain={gain_24h}%")
+            results.append({
+                "address":   token_id,
+                "symbol":    symbol,
+                "name":      pool_name,
+                "chain":     network,
+                "gain_24h":  gain_24h,
+                "gain_1h":   gain_1h,
+                "volume":    volume_24h,
+                "liquidity": liquidity,
+                "mcap":      market_cap,
+                "url":       url,
+                "source":    "gecko",
+            })
+
+        except Exception as e:
+            logger.warning(f"Error parsing gecko pool: {e}")
+
+    logger.info(f"GeckoTerminal: {len(results)} token lolos filter")
+    return results
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AI NARRATIVE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_narrative(token: dict) -> tuple:
     """
-    Minta Claude mencari konteks/berita di balik pump token ini.
-    Return None jika tidak ada narasi yang valid (sinyal: SKIP).
+    Return (narasi, kategori).
+    Micin (dex): kategori = None.
+    Non-micin (gecko): kategori = string misal "AI", "RWA", dll.
+    Return (None, None) jika SKIP.
     """
     if not AGENTROUTER_API_KEY:
-        logger.warning("AGENTROUTER_API_KEY missing — narasi dinonaktifkan")
-        return "Konteks tidak tersedia (API Key missing)."
+        return "Konteks tidak tersedia (API Key missing).", None
 
-    prompt = f"""Kamu adalah analis crypto yang bertugas mencari ALASAN di balik pergerakan harga token.
+    is_gecko = token.get("source") == "gecko"
+
+    if is_gecko:
+        prompt = f"""Kamu adalah analis crypto. Analisis token berikut yang sedang trending secara organik:
 
 Token: {token['symbol']} ({token['name']})
 Chain: {token['chain']}
@@ -207,11 +275,32 @@ Volume: ${token['volume']:,.0f}
 Market Cap: ${token['mcap']:,.0f}
 
 Tugasmu:
-1. Gunakan web search untuk mencari berita, tren, atau event terkini yang berkaitan dengan ticker "{token['symbol']}" atau nama "{token['name']}"
-2. Jika kamu menemukan korelasi yang masuk akal antara berita/tren tersebut dengan kenaikan harga ini, tulis narasi 2-3 kalimat dalam Bahasa Indonesia yang menjelaskan konteksnya.
-3. Jika tidak ada narasi yang jelas, atau kenaikan tampak seperti manipulasi/pump tanpa konteks nyata, balas HANYA dengan kata: SKIP
+1. Gunakan web search untuk mencari konteks di balik kenaikan token ini
+2. Tentukan apakah ini token micin/scam. Jika YA, balas HANYA: SKIP
+3. Jika bukan micin, tentukan KATEGORI token ini. Contoh: AI, RWA, DeFi, GameFi, Layer2, Infrastructure, Meme Established, SocialFi, atau kategori lain yang paling sesuai
+4. Tulis narasi 2-3 kalimat Bahasa Indonesia yang menjelaskan konteks kenaikannya
 
-Jangan berikan saran investasi. Fokus pada analisis konteks."""
+Format jawaban WAJIB (jika tidak SKIP):
+KATEGORI: [isi kategori]
+NARASI: [isi narasi]
+
+Jangan berikan saran investasi."""
+
+    else:
+        prompt = f"""Kamu adalah analis crypto yang mencari ALASAN di balik pergerakan harga token.
+
+Token: {token['symbol']} ({token['name']})
+Chain: {token['chain']}
+Kenaikan: +{token['gain_24h']:.1f}% dalam 24 jam
+Volume: ${token['volume']:,.0f}
+Market Cap: ${token['mcap']:,.0f}
+
+Tugasmu:
+1. Gunakan web search untuk mencari berita, tren, atau event terkini yang berkaitan dengan token ini
+2. Jika ada korelasi yang masuk akal antara berita/tren dengan kenaikan harga, tulis narasi 2-3 kalimat Bahasa Indonesia
+3. Jika tidak ada konteks nyata atau tampak manipulasi, balas HANYA: SKIP
+
+Jangan berikan saran investasi."""
 
     try:
         response = requests.post(
@@ -222,7 +311,7 @@ Jangan berikan saran investasi. Fokus pada analisis konteks."""
             },
             json={
                 "model": "claude-opus-4-6",
-                "max_tokens": 300,
+                "max_tokens": 400,
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                 "messages": [{"role": "user", "content": prompt}]
             },
@@ -230,94 +319,109 @@ Jangan berikan saran investasi. Fokus pada analisis konteks."""
         )
 
         if response.status_code == 200:
-            content_blocks = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-
-            # Handle jika content berupa list of blocks (tool use response)
-            if isinstance(content_blocks, list):
-                narrative = " ".join(
-                    block.get("text", "") for block in content_blocks
-                    if block.get("type") == "text"
-                ).strip()
+            content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            if isinstance(content, list):
+                text = " ".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
             else:
-                narrative = str(content_blocks).strip()
+                text = str(content).strip()
 
-            if not narrative or narrative.upper() == "SKIP":
-                logger.info(f"Narasi SKIP untuk {token['symbol']} — tidak ada konteks yang valid")
-                return None
+            if not text or text.strip().upper() == "SKIP":
+                logger.info(f"AI SKIP: {token['symbol']}")
+                return None, None
 
-            return narrative
+            if is_gecko and "KATEGORI:" in text and "NARASI:" in text:
+                kategori, narasi = "", []
+                for line in text.split("\n"):
+                    if line.startswith("KATEGORI:"):
+                        kategori = line.replace("KATEGORI:", "").strip()
+                    elif line.startswith("NARASI:"):
+                        narasi.append(line.replace("NARASI:", "").strip())
+                    elif narasi:
+                        narasi.append(line.strip())
+                return " ".join(narasi).strip(), kategori
 
-        else:
-            logger.error(f"AgentRouter error {response.status_code}: {response.text[:200]}")
+            return text, None
+
+        logger.error(f"AgentRouter {response.status_code}: {response.text[:200]}")
 
     except Exception as e:
-        logger.error(f"Error generating narrative for {token['symbol']}: {e}")
+        logger.error(f"Error narrative {token['symbol']}: {e}")
 
-    return "Gagal mendapatkan narasi otomatis."
+    return "Gagal mendapatkan narasi otomatis.", None
 
-# ─── Telegram Report ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# TELEGRAM REPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
 TIER_EMOJI = {"Mega": "🔥", "Mid": "⚡", "Micro": "🌱"}
 
-def send_telegram_report(categorized: dict, sent_cache: set):
+def send_telegram_report(dex_categorized: dict, gecko_tokens: list, sent_cache: set):
     if not BOT_TOKEN or not CHAT_ID:
         logger.error("Telegram BOT_TOKEN atau CHAT_ID tidak dikonfigurasi.")
         return
 
-    # Kumpulkan semua token yang perlu narasi
-    all_tokens_flat = [
-        (tier, token)
-        for tier, tokens in categorized.items()
-        for token in tokens
-    ]
+    all_tokens = (
+        [(t, "dex") for tier in dex_categorized.values() for t in tier] +
+        [(t, "gecko") for t in gecko_tokens]
+    )
 
-    if not all_tokens_flat:
-        logger.info("Tidak ada token lolos filter — laporan tidak dikirim.")
+    if not all_tokens:
+        logger.info("Tidak ada token untuk dikirim.")
         return
 
-    logger.info(f"Generating narratives for {len(all_tokens_flat)} tokens...")
+    logger.info(f"Generating narratives untuk {len(all_tokens)} token...")
 
-    # Generate semua narasi secara paralel
     narratives = {}
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_token = {
-            executor.submit(generate_narrative, token): (tier, token)
-            for tier, token in all_tokens_flat
-        }
-        for future in as_completed(future_to_token):
-            tier, token = future_to_token[future]
+        future_map = {executor.submit(generate_narrative, t): t for t, _ in all_tokens}
+        for future in as_completed(future_map):
+            token = future_map[future]
             narratives[token["address"]] = future.result()
 
-    # Bangun laporan — hanya token yang punya narasi valid
     report = "🚀 *CRYPTO ANOMALI REPORT*\n"
     report += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} WIB\n\n"
-
     found_any = False
     new_sent = set()
 
-    for tier, tokens in categorized.items():
-        tier_block = ""
+    # Micin Watch
+    micin_block = ""
+    for tier, tokens in dex_categorized.items():
         for token in tokens:
-            narrative = narratives.get(token["address"])
-            if narrative is None:
-                # Token di-skip karena tidak ada narasi valid
+            narasi, _ = narratives.get(token["address"], (None, None))
+            if narasi is None:
                 continue
-
             found_any = True
             new_sent.add(token["address"])
+            micin_block += f"{TIER_EMOJI[tier]} *${token['symbol']}* +{token['gain_24h']:.1f}% `({token['chain']})`\n"
+            micin_block += f"💡 *Konteks:* {narasi}\n"
+            micin_block += f"📊 Vol: `${token['volume']:,.0f}` | Liq: `${token['liquidity']:,.0f}` | MCap: `${token['mcap']:,.0f}`\n"
+            micin_block += f"🔗 [Dexscreener]({token['url']})\n\n"
 
-            tier_block += f"{TIER_EMOJI[tier]} *${token['symbol']}* +{token['gain_24h']:.1f}% `({token['chain']})`\n"
-            tier_block += f"💡 *Konteks:* {narrative}\n"
-            tier_block += f"📊 Vol: `${token['volume']:,.0f}` | Liq: `${token['liquidity']:,.0f}` | MCap: `${token['mcap']:,.0f}`\n"
-            tier_block += f"🔗 [Lihat di Dexscreener]({token['url']})\n\n"
+    if micin_block:
+        report += "━━━ 🌱 *MICIN WATCH* ━━━\n" + micin_block
 
-        if tier_block:
-            report += f"*── {tier.upper()} ANOMALI ──*\n{tier_block}"
+    # Non-Micin Gems
+    gem_block = ""
+    for token in gecko_tokens:
+        narasi, kategori = narratives.get(token["address"], (None, None))
+        if narasi is None:
+            continue
+        found_any = True
+        new_sent.add(token["address"])
+        gem_block += f"💎 *${token['symbol']}* +{token['gain_24h']:.1f}% `({token['chain']})`\n"
+        if kategori:
+            gem_block += f"🏷️ *Kategori:* `{kategori}`\n"
+        gem_block += f"💡 *Konteks:* {narasi}\n"
+        gem_block += f"📊 Vol: `${token['volume']:,.0f}` | Liq: `${token['liquidity']:,.0f}` | MCap: `${token['mcap']:,.0f}`\n"
+        gem_block += f"🔗 [GeckoTerminal]({token['url']})\n\n"
+
+    if gem_block:
+        report += "━━━ 💎 *NON-MICIN GEMS* ━━━\n" + gem_block
 
     if not found_any:
-        logger.info("Semua token di-skip oleh AI (tidak ada narasi valid) — laporan tidak dikirim.")
+        logger.info("Semua token di-skip AI — laporan tidak dikirim.")
         return
 
-    # Kirim ke Telegram
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         r = requests.post(url, json={
@@ -326,53 +430,50 @@ def send_telegram_report(categorized: dict, sent_cache: set):
             "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }, timeout=15)
-
         if r.status_code == 200:
-            logger.info(f"Laporan berhasil dikirim ke Telegram ({len(new_sent)} token)")
+            logger.info(f"Laporan dikirim ({len(new_sent)} token)")
             sent_cache.update(new_sent)
             save_sent_cache(sent_cache)
         else:
             logger.error(f"Telegram error {r.status_code}: {r.text[:200]}")
-
     except Exception as e:
-        logger.error(f"Error sending Telegram message: {e}")
+        logger.error(f"Error sending Telegram: {e}")
 
-# ─── Main Scan Job ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def run_scan():
     logger.info("=" * 50)
     logger.info("Starting Crypto Anomali Scan...")
 
     sent_cache = load_sent_cache()
 
+    # Layer 1 — Dexscreener (Micin Watch)
     boosts = fetch_boosts()
-    if not boosts:
-        logger.warning("Tidak ada data boost yang di-fetch. Scan dibatalkan.")
-        return
-    logger.info(f"Total raw boosts dari Dexscreener: {len(boosts)}")
+    dex_categorized = fetch_and_filter_dex(boosts, sent_cache) if boosts else {"Mega": [], "Mid": [], "Micro": []}
 
-    categorized = filter_and_categorize(boosts, sent_cache)
+    # Layer 2 — GeckoTerminal (Non-Micin Gems)
+    gecko_pools  = fetch_gecko_trending()
+    gecko_tokens = fetch_and_filter_gecko(gecko_pools, sent_cache) if gecko_pools else []
 
-    total = sum(len(v) for v in categorized.values())
-    logger.info(f"Token lolos filter: {total} (Mega={len(categorized['Mega'])}, Mid={len(categorized['Mid'])}, Micro={len(categorized['Micro'])})")
+    total_dex = sum(len(v) for v in dex_categorized.values())
+    logger.info(f"Siap dikirim — Micin: {total_dex} | Gems: {len(gecko_tokens)}")
 
-    send_telegram_report(categorized, sent_cache)
+    send_telegram_report(dex_categorized, gecko_tokens, sent_cache)
 
     logger.info("Scan selesai.")
     logger.info("=" * 50)
 
-# ─── Entry Point ──────────────────────────────────────────────────────────────
+
 def main():
     logger.info(f"Crypto Anomali Bot started — scan setiap {SCAN_INTERVAL_MIN} menit")
-
-    # Jalankan sekali langsung saat start
     run_scan()
-
-    # Schedule berikutnya
     schedule.every(SCAN_INTERVAL_MIN).minutes.do(run_scan)
-
     while True:
         schedule.run_pending()
         time.sleep(60)
+
 
 if __name__ == "__main__":
     main()
