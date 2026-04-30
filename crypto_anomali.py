@@ -343,6 +343,7 @@ Jangan berikan saran investasi."""
             return text, None
 
         logger.error(f"AgentRouter {response.status_code}: {response.text[:200]}")
+        logger.error(f"AgentRouter response body: {response.text[:500]}")
 
     except Exception as e:
         logger.error(f"Error narrative {token['symbol']}: {e}")
