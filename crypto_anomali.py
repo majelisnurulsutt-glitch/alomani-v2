@@ -310,14 +310,17 @@ Jangan berikan saran investasi."""
                 "Content-Type": "application/json"
             },
             json={
-                "model": "claude-opus-4-6",
-                "max_tokens": 400,
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 50000,
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=45
         )
-
+        if not response.text or not response.text.strip():
+            logger.error(f"AgentRouter: response kosong untuk {token['symbol']}")
+            return None, None
+            
         if response.status_code == 200:
             content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
             if isinstance(content, list):
